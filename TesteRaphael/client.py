@@ -6,6 +6,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 import os
 import time
+import sys
+import queue
 
 class ChatClient:
     def __init__(self, host: str = 'localhost', port: int = 5000):
@@ -14,7 +16,10 @@ class ChatClient:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = False
         self.secret_key = os.urandom(32)  # Chave AES-256
-        self.message_buffer = []
+        self.message_queue = queue.Queue()
+        self.receive_thread = None
+        self.lock = threading.Lock()
+        self.print_lock = threading.Lock()
         
     def connect(self, username: str):
         try:
@@ -41,15 +46,20 @@ class ChatClient:
             # Enviar nome de usuário criptografado
             cipher = Cipher(algorithms.AES(self.secret_key), modes.CFB(b'\0' * 16))
             encryptor = cipher.encryptor()
-            encrypted_username = encryptor.update(username.encode()) + encryptor.finalize()
+            encrypted_username = encryptor.update(username.encode('utf-8')) + encryptor.finalize()
             self.socket.send(encrypted_username)
             
             self.running = True
             
             # Iniciar thread para receber mensagens
-            receive_thread = threading.Thread(target=self.receive_messages)
-            receive_thread.daemon = True
-            receive_thread.start()
+            self.receive_thread = threading.Thread(target=self.receive_messages)
+            self.receive_thread.daemon = False
+            self.receive_thread.start()
+            
+            # Iniciar thread para processar mensagens
+            process_thread = threading.Thread(target=self.process_messages)
+            process_thread.daemon = False
+            process_thread.start()
             
             return True
             
@@ -59,14 +69,25 @@ class ChatClient:
             
     def send_message(self, message: str):
         try:
-            # Criptografar mensagem
-            cipher = Cipher(algorithms.AES(self.secret_key), modes.CFB(b'\0' * 16))
-            encryptor = cipher.encryptor()
-            encrypted_message = encryptor.update(message.encode()) + encryptor.finalize()
-            self.socket.send(encrypted_message)
+            with self.lock:
+                if not self.running:
+                    return
+                    
+                # Exibir a própria mensagem
+                with self.print_lock:
+                    print(f"\033[2J\033[H", end="")
+                    print(f"(Você): {message}")
+                    print("Digite uma mensagem: ", end='', flush=True)
+                    
+                # Criptografar mensagem
+                cipher = Cipher(algorithms.AES(self.secret_key), modes.CFB(b'\0' * 16))
+                encryptor = cipher.encryptor()
+                encrypted_message = encryptor.update(message.encode('utf-8')) + encryptor.finalize()
+                self.socket.send(encrypted_message)
             
         except Exception as e:
-            print(f"Erro ao enviar mensagem: {e}")
+            if self.running:
+                print(f"Erro ao enviar mensagem: {e}")
             
     def receive_messages(self):
         while self.running:
@@ -80,19 +101,54 @@ class ChatClient:
                 cipher = Cipher(algorithms.AES(self.secret_key), modes.CFB(b'\0' * 16))
                 decryptor = cipher.decryptor()
                 message = decryptor.update(encrypted_message) + decryptor.finalize()
-                decoded_message = message.decode('utf-8')
-                print(f"\n{decoded_message}")
-                print("Digite uma mensagem: ", end='', flush=True)
+                
+                try:
+                    decoded_message = message.decode('utf-8')
+                    self.message_queue.put(decoded_message)
+                except UnicodeDecodeError:
+                    # Se não conseguir decodificar como UTF-8, ignora a mensagem
+                    continue
                 
             except Exception as e:
-                print(f"\nErro ao receber mensagem: {e}")
+                if self.running:
+                    print(f"\nErro ao receber mensagem: {e}")
                 break
                 
         self.running = False
         
+    def process_messages(self):
+        while self.running:
+            try:
+                message = self.message_queue.get(timeout=0.1)
+                with self.print_lock:
+                    # Limpar a tela e mover o cursor para o início
+                    print("\033[2J\033[H", end="")
+                    # Imprimir a mensagem recebida
+                    print(f"{message}")
+                    # Imprimir o prompt em uma nova linha
+                    print("Digite uma mensagem: ", end='', flush=True)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"\nErro ao processar mensagem: {e}")
+                break
+                
     def disconnect(self):
-        self.running = False
-        self.socket.close()
+        try:
+            with self.lock:
+                self.running = False
+                # Enviar mensagem de desconexão
+                self.send_message("sair")
+                time.sleep(0.1)  # Pequeno delay para garantir que a mensagem seja enviada
+                self.socket.close()
+                
+            # Aguardar threads terminarem
+            if self.receive_thread and self.receive_thread.is_alive():
+                self.receive_thread.join(timeout=1.0)
+                
+        except Exception as e:
+            print(f"Erro ao desconectar: {e}")
 
 def main():
     client = ChatClient()
@@ -105,12 +161,17 @@ def main():
             while True:
                 message = input("Digite uma mensagem: ")
                 if message.lower() == 'sair':
+                    client.disconnect()
                     break
                 client.send_message(message)
         except KeyboardInterrupt:
-            pass
-            
-        client.disconnect()
+            print("\nEncerrando cliente...")
+            client.disconnect()
+        except Exception as e:
+            print(f"Erro: {e}")
+            client.disconnect()
+        finally:
+            sys.exit(0)
 
 if __name__ == "__main__":
     main() 
