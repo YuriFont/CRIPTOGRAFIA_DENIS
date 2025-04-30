@@ -20,6 +20,8 @@ class ChatClient:
         self.receive_thread = None
         self.lock = threading.Lock()
         self.print_lock = threading.Lock()
+        self.message_history = []  # Lista para armazenar o histórico de mensagens
+        self.max_history = 10  # Número máximo de mensagens a serem exibidas
         
     def connect(self, username: str):
         try:
@@ -61,23 +63,34 @@ class ChatClient:
             process_thread.daemon = False
             process_thread.start()
             
+            # Exibir prompt inicial
+            self.display_messages()
+            
             return True
             
         except Exception as e:
             print(f"Erro ao conectar: {e}")
             return False
             
+    def display_messages(self):
+        """Exibe todas as mensagens do histórico"""
+        with self.print_lock:
+            # Limpar a tela
+            print("\033[2J\033[H", end="")
+            # Exibir histórico de mensagens
+            for msg in self.message_history[-self.max_history:]:
+                print(msg)
+                
     def send_message(self, message: str):
         try:
             with self.lock:
                 if not self.running:
                     return
                     
-                # Exibir a própria mensagem
-                with self.print_lock:
-                    print(f"\033[2J\033[H", end="")
-                    print(f"(Você): {message}")
-                    print("Digite uma mensagem: ", end='', flush=True)
+                # Adicionar mensagem ao histórico
+                self.message_history.append(f"(Você): {message}")
+                # Exibir todas as mensagens
+                self.display_messages()
                     
                 # Criptografar mensagem
                 cipher = Cipher(algorithms.AES(self.secret_key), modes.CFB(b'\0' * 16))
@@ -120,13 +133,10 @@ class ChatClient:
         while self.running:
             try:
                 message = self.message_queue.get(timeout=0.1)
-                with self.print_lock:
-                    # Limpar a tela e mover o cursor para o início
-                    print("\033[2J\033[H", end="")
-                    # Imprimir a mensagem recebida
-                    print(f"{message}")
-                    # Imprimir o prompt em uma nova linha
-                    print("Digite uma mensagem: ", end='', flush=True)
+                # Adicionar mensagem ao histórico
+                self.message_history.append(message)
+                # Exibir todas as mensagens
+                self.display_messages()
             except queue.Empty:
                 continue
             except Exception as e:
@@ -156,14 +166,18 @@ def main():
     
     if client.connect(username):
         print("Conectado ao servidor!")
+        # Exibir prompt inicial
+        print("Digite uma mensagem: ", end='', flush=True)
         
         try:
             while True:
-                message = input("Digite uma mensagem: ")
+                message = input()
                 if message.lower() == 'sair':
                     client.disconnect()
                     break
                 client.send_message(message)
+                # Exibir prompt após enviar mensagem
+                print("Digite uma mensagem: ", end='', flush=True)
         except KeyboardInterrupt:
             print("\nEncerrando cliente...")
             client.disconnect()
